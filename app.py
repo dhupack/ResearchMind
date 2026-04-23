@@ -1,6 +1,7 @@
 import streamlit as st
 import time
 from agents import build_reader_agent, build_search_agent, writer_chain, critic_chain
+from graph import research_graph
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -408,51 +409,50 @@ if st.session_state.running and not st.session_state.done:
     results = {}
     topic_val = st.session_state.topic_input
 
-    # ── Step 1: Search ──
-    with st.spinner("🔍  Search Agent is working…"):
-        search_agent = build_search_agent()
-        sr = search_agent.invoke({
-            "messages": [("user", f"Find recent, reliable and detailed information about: {topic_val}")]
-        })
-        results["search"] = sr["messages"][-1].content
-        st.session_state.results = dict(results)
-    st.rerun() if False else None   # keep inline for now
+    spinner_text = {
+        "search": "🔍  Search Agent is working…",
+        "reader": "📄  Reader Agent is scraping top resources…",
+        "writer": "✍️  Writer is drafting the report…",
+        "critic": "🧐  Critic is reviewing the report…",
+        "rewrite_counter": "🔁  Applying critic feedback and rewriting…",
+    }
 
-    # ── Step 2: Reader ──
-    with st.spinner("📄  Reader Agent is scraping top resources…"):
-        reader_agent = build_reader_agent()
-        rr = reader_agent.invoke({
-            "messages": [("user",
-                f"Based on the following search results about '{topic_val}', "
-                f"pick the most relevant URL and scrape it for deeper content.\n\n"
-                f"Search Results:\n{results['search'][:800]}"
-            )]
-        })
-        results["reader"] = rr["messages"][-1].content
-        st.session_state.results = dict(results)
+    status_slot = st.empty()
 
-    # ── Step 3: Writer ──
-    with st.spinner("✍️  Writer is drafting the report…"):
-        research_combined = (
-            f"SEARCH RESULTS:\n{results['search']}\n\n"
-            f"DETAILED SCRAPED CONTENT:\n{results['reader']}"
-        )
-        results["writer"] = writer_chain.invoke({
-            "topic": topic_val,
-            "research": research_combined
-        })
-        st.session_state.results = dict(results)
+    # IMPORTANT: spinner wraps the long-running stream call
+    with st.spinner("Running research pipeline..."):
+        for event in research_graph.stream(
+            {
+                "topic": topic_val,
+                "rewrite_count": 0,
+                "max_rewrites": 2,
+            }
+        ):
+            node_name = next(iter(event.keys()))
+            node_update = event[node_name]
 
-    # ── Step 4: Critic ──
-    with st.spinner("🧐  Critic is reviewing the report…"):
-        results["critic"] = critic_chain.invoke({
-            "report": results["writer"]
-        })
-        st.session_state.results = dict(results)
+            # live text update (acts like per-step buffering message)
+            status_slot.info(spinner_text.get(node_name, "Running pipeline..."))
 
+            if node_name == "search":
+                results["search"] = node_update.get("search_results", "")
+            elif node_name == "reader":
+                results["reader"] = node_update.get("scraped_content", "")
+            elif node_name == "writer":
+                results["writer"] = node_update.get("report", "")
+            elif node_name == "critic":
+                results["critic"] = node_update.get("feedback", "")
+                results["score"] = node_update.get("score", 0)
+            elif node_name == "rewrite_counter":
+                results["rewrite_count"] = node_update.get("rewrite_count", 0)
+
+            st.session_state.results = dict(results)
+
+    status_slot.empty()
     st.session_state.running = False
     st.session_state.done = True
     st.rerun()
+
 
 
 # ── Results display ───────────────────────────────────────────────────────────
